@@ -461,9 +461,11 @@ class RedditSimulationRunner:
         
         print(f"LLM配置: model={llm_model}, base_url={llm_base_url[:40] if llm_base_url else '默认'}...")
         
+        context_window = int(os.environ.get("LLM_CONTEXT_WINDOW", "65536"))
         return ModelFactory.create(
             model_platform=ModelPlatformType.OPENAI,
             model_type=llm_model,
+            model_config_dict={"max_tokens": context_window},
         )
     
     def _get_active_agents_for_round(

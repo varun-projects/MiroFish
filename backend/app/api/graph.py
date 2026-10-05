@@ -799,19 +799,33 @@ def _build_graph_impl():
                     )
                 
             except Exception as e:
-                # 更新项目状态为失败
-                build_logger.error(f"[{task_id}] 图谱构建失败: {str(e)}")
-                build_logger.debug(traceback.format_exc())
-                
+                provider_status = getattr(e, "status_code", None)
+                request_id = getattr(e, "request_id", None)
+
+                if isinstance(provider_status, int):
+                    public_error = f"Provider request failed (HTTP {provider_status})"
+                    if request_id:
+                        safe_id = re.sub(r"[^a-zA-Z0-9._:-]", "", str(request_id))[:128]
+                        if safe_id:
+                            public_error += f" (request_id: {safe_id})"
+                    build_logger.error(
+                        "[%s] Provider request failed: type=%s status=%s request_id=%s",
+                        task_id, type(e).__name__, provider_status, request_id or "unknown",
+                    )
+                else:
+                    public_error = str(e)
+                    build_logger.error("[%s] 图谱构建失败: %s", task_id, public_error)
+                    build_logger.debug(traceback.format_exc())
+
                 with _project_build_lock(project_id):
                     project.status = ProjectStatus.FAILED
-                    project.error = str(e)
+                    project.error = public_error
                     ProjectManager.save_project(project)
 
                     task_manager.update_task(
                         task_id,
                         status=TaskStatus.FAILED,
-                        message=t('progress.buildFailed', error=str(e)),
+                        message=t('progress.buildFailed', error=public_error),
                         error=traceback.format_exc()
                     )
         
@@ -832,11 +846,21 @@ def _build_graph_impl():
     except GraphInUseError as e:
         return jsonify({"success": False, "error": str(e)}), 409
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        provider_status = getattr(e, "status_code", None)
+        request_id = getattr(e, "request_id", None)
+        if isinstance(provider_status, int):
+            public_error = f"Provider request failed (HTTP {provider_status})"
+            if request_id:
+                safe_id = re.sub(r"[^a-zA-Z0-9._:-]", "", str(request_id))[:128]
+                if safe_id:
+                    public_error += f" (request_id: {safe_id})"
+            logger.error(
+                "Graph build provider request failed: type=%s status=%s request_id=%s",
+                type(e).__name__, provider_status, request_id or "unknown",
+            )
+            return jsonify({"success": False, "error": public_error}), 502
+        logger.exception("Unexpected failure in build_graph")
+        return jsonify({"success": False, "error": "Graph build failed; see server logs"}), 500
 
 
 # ============== 任务查询接口 ==============
@@ -897,11 +921,21 @@ def get_graph_data(graph_id: str):
         })
         
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        provider_status = getattr(e, "status_code", None)
+        request_id = getattr(e, "request_id", None)
+        if isinstance(provider_status, int):
+            public_error = f"Provider request failed (HTTP {provider_status})"
+            if request_id:
+                safe_id = re.sub(r"[^a-zA-Z0-9._:-]", "", str(request_id))[:128]
+                if safe_id:
+                    public_error += f" (request_id: {safe_id})"
+            logger.error(
+                "get_graph_data provider request failed: type=%s status=%s request_id=%s",
+                type(e).__name__, provider_status, request_id or "unknown",
+            )
+            return jsonify({"success": False, "error": public_error}), 502
+        logger.exception("Unexpected failure in get_graph_data")
+        return jsonify({"success": False, "error": "Failed to fetch graph data; see server logs"}), 500
 
 
 @graph_bp.route('/delete/<graph_id>', methods=['DELETE'])
@@ -956,8 +990,18 @@ def delete_graph(graph_id: str):
     except GraphInUseError as e:
         return jsonify({"success": False, "error": str(e)}), 409
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        provider_status = getattr(e, "status_code", None)
+        request_id = getattr(e, "request_id", None)
+        if isinstance(provider_status, int):
+            public_error = f"Provider request failed (HTTP {provider_status})"
+            if request_id:
+                safe_id = re.sub(r"[^a-zA-Z0-9._:-]", "", str(request_id))[:128]
+                if safe_id:
+                    public_error += f" (request_id: {safe_id})"
+            logger.error(
+                "delete_graph provider request failed: type=%s status=%s request_id=%s",
+                type(e).__name__, provider_status, request_id or "unknown",
+            )
+            return jsonify({"success": False, "error": public_error}), 502
+        logger.exception("Unexpected failure in delete_graph")
+        return jsonify({"success": False, "error": "Failed to delete graph; see server logs"}), 500
