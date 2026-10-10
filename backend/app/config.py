@@ -14,6 +14,26 @@ else:
     load_dotenv(override=True)
 
 
+def _optional_float(key: str) -> float | None:
+    """Read an optional float setting, returning None when it is not usable.
+
+    未设置、留空或无法解析时都返回 None，调用方据此沿用内置默认值，
+    避免一个手误的配置值让整个应用启动失败。
+    """
+    raw = os.environ.get(key)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        import warnings
+        warnings.warn(
+            f"{key}={raw!r} is not a number; falling back to the built-in defaults.",
+            RuntimeWarning,
+        )
+        return None
+
+
 class Config:
     """Flask配置类"""
     
@@ -60,6 +80,32 @@ class Config:
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
     REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
     
+    # 人群构建配置（本体 -> 实体 -> 人设 这条链路上的采样温度）
+    # 不设置时每个阶段沿用自己的历史默认值；设为 0 可得到可复现的人群
+    COHORT_TEMPERATURE = _optional_float('COHORT_TEMPERATURE')
+    # 重试阶梯每次下调的幅度（见各调用点的"每次重试降低温度"）
+    COHORT_TEMPERATURE_RETRY_STEP = 0.1
+
+    @classmethod
+    def cohort_temperature(cls, default: float, attempt: int = 0) -> float:
+        """Resolve the cohort-construction temperature for one LLM attempt.
+
+        未配置 COHORT_TEMPERATURE 时返回调用点传入的历史默认值，行为与之前完全一致；
+        配置后三个阶段共用同一个基准值。重试阶梯依旧每次降低 0.1，但下限截断在 0，
+        因此基准值为 0（或任何小于阶梯总降幅的值）都不会算出负温度发给模型。
+
+        Args:
+            default: 该阶段的历史默认温度（未配置时使用）
+            attempt: 第几次尝试，从 0 开始
+
+        Returns:
+            本次请求使用的温度，始终 >= 0
+        """
+        base = cls.COHORT_TEMPERATURE
+        if base is None:
+            base = default
+        return max(0.0, base - (attempt * cls.COHORT_TEMPERATURE_RETRY_STEP))
+
     @classmethod
     def validate(cls) -> list[str]:
         """验证必要配置"""
