@@ -67,7 +67,15 @@ def extract_chat_completion_text(response: Any) -> str:
     if message is None:
         return ""
 
-    content = getattr(message, "content", "")
+    content = getattr(message, "content", None)
+
+    if content is None:
+        # Reasoning models (e.g. DeepSeek-R1) set content=None and place their
+        # output in reasoning_content instead.
+        reasoning = getattr(message, "reasoning_content", None)
+        if isinstance(reasoning, str) and reasoning:
+            return reasoning
+        return ""
 
     if isinstance(content, str):
         return content
