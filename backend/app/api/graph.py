@@ -5,7 +5,6 @@
 
 import os
 import re
-import traceback
 import threading
 from contextlib import ExitStack, nullcontext
 from flask import request, jsonify
@@ -117,6 +116,45 @@ def _project_has_active_build(project) -> bool:
         task
         and task.status in {TaskStatus.PENDING, TaskStatus.PROCESSING}
     )
+
+
+def _classify_failure(error: Exception, operation: str, *, log=None) -> tuple[str, int]:
+    """Map an exception to a client-safe message and an HTTP status.
+
+    A provider failure keeps its upstream HTTP status so a caller can tell a
+    retired model or a rate limit apart from a server bug. Provider exception
+    bodies may echo request content, so nothing from the body (or the stack)
+    reaches the client. Keep the server log useful without serializing the
+    exception body.
+    """
+
+    target_log = log or logger
+    provider_status = getattr(error, "status_code", None)
+    request_id = getattr(error, "request_id", None)
+
+    if isinstance(error, LLMResponseError):
+        target_log.exception("%s hit an unusable LLM response", operation)
+        return str(error), 502
+
+    if isinstance(provider_status, int):
+        public_error = f"Provider request failed (HTTP {provider_status})"
+        if request_id:
+            safe_request_id = re.sub(
+                r"[^a-zA-Z0-9._:-]", "", str(request_id)
+            )[:128]
+            if safe_request_id:
+                public_error += f" (request_id: {safe_request_id})"
+        target_log.error(
+            "%s failed at the provider: type=%s status=%s request_id=%s",
+            operation,
+            type(error).__name__,
+            provider_status,
+            request_id or "unknown",
+        )
+        return public_error, 502
+
+    target_log.exception("%s failed unexpectedly", operation)
+    return f"{operation} failed; check the server logs", 500
 
 
 def allowed_file(filename: str) -> bool:
@@ -799,20 +837,23 @@ def _build_graph_impl():
                     )
                 
             except Exception as e:
+                # 任务状态会直接回传给客户端，只写入安全信息，堆栈留在服务端日志
+                public_error, _ = _classify_failure(
+                    e, "Graph build", log=build_logger
+                )
+                build_logger.error(f"[{task_id}] 图谱构建失败: {public_error}")
+
                 # 更新项目状态为失败
-                build_logger.error(f"[{task_id}] 图谱构建失败: {str(e)}")
-                build_logger.debug(traceback.format_exc())
-                
                 with _project_build_lock(project_id):
                     project.status = ProjectStatus.FAILED
-                    project.error = str(e)
+                    project.error = public_error
                     ProjectManager.save_project(project)
 
                     task_manager.update_task(
                         task_id,
                         status=TaskStatus.FAILED,
-                        message=t('progress.buildFailed', error=str(e)),
-                        error=traceback.format_exc()
+                        message=t('progress.buildFailed', error=public_error),
+                        error=public_error
                     )
         
         # 启动后台线程
@@ -832,11 +873,11 @@ def _build_graph_impl():
     except GraphInUseError as e:
         return jsonify({"success": False, "error": str(e)}), 409
     except Exception as e:
+        public_error, response_status = _classify_failure(e, "Graph build request")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+            "error": public_error
+        }), response_status
 
 
 # ============== 任务查询接口 ==============
@@ -897,11 +938,11 @@ def get_graph_data(graph_id: str):
         })
         
     except Exception as e:
+        public_error, response_status = _classify_failure(e, "Graph data request")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+            "error": public_error
+        }), response_status
 
 
 @graph_bp.route('/delete/<graph_id>', methods=['DELETE'])
@@ -956,8 +997,8 @@ def delete_graph(graph_id: str):
     except GraphInUseError as e:
         return jsonify({"success": False, "error": str(e)}), 409
     except Exception as e:
+        public_error, response_status = _classify_failure(e, "Graph deletion")
         return jsonify({
             "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+            "error": public_error
+        }), response_status
