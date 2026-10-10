@@ -15,7 +15,11 @@ from enum import Enum
 from ..config import Config
 from ..utils.logger import get_logger
 from .zep_entity_reader import ZepEntityReader, FilteredEntities
-from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
+from .oasis_profile_generator import (
+    OasisProfileGenerator,
+    OasisAgentProfile,
+    partition_persona_entities,
+)
 from .simulation_config_generator import SimulationConfigGenerator, SimulationParameters
 from ..utils.locale import t
 
@@ -302,25 +306,37 @@ class SimulationManager:
                 enrich_with_edges=True
             )
             
-            state.entities_count = filtered.filtered_count
+            # 只过滤一次：人设和Agent活动配置必须拿到同一份实体列表，
+            # 否则 profile 的 user_id 与 agent_config 的 agent_id 会错位
+            usable_entities, skipped_entities = partition_persona_entities(filtered.entities)
+            for skipped_entity, reason in skipped_entities:
+                logger.warning(t(
+                    'progress.personaEntitySkipped',
+                    name=skipped_entity.name,
+                    reason=reason
+                ))
+
+            # entities_count 对外即"预期Agent总数"（expected_entities_count），
+            # 因此记录实际可用的实体数，被剔除的部分通过上面的日志体现
+            state.entities_count = len(usable_entities)
             state.entity_types = list(filtered.entity_types)
             
             if progress_callback:
                 progress_callback(
                     "reading", 100,
-                    t('progress.readingComplete', count=filtered.filtered_count),
-                    current=filtered.filtered_count,
-                    total=filtered.filtered_count
+                    t('progress.readingComplete', count=len(usable_entities)),
+                    current=len(usable_entities),
+                    total=len(usable_entities)
                 )
             
-            if filtered.filtered_count == 0:
+            if not usable_entities:
                 state.status = SimulationStatus.FAILED
                 state.error = "没有找到符合条件的实体，请检查图谱是否正确构建"
                 self._save_simulation_state(state)
                 raise ValueError(state.error)
             
             # ========== 阶段2: 生成Agent Profile ==========
-            total_entities = len(filtered.entities)
+            total_entities = len(usable_entities)
             
             if progress_callback:
                 progress_callback(
@@ -355,7 +371,7 @@ class SimulationManager:
                 realtime_platform = "twitter"
             
             profiles = generator.generate_profiles_from_entities(
-                entities=filtered.entities,
+                entities=usable_entities,
                 use_llm=use_llm_for_profiles,
                 progress_callback=profile_progress,
                 graph_id=state.graph_id,  # 传入graph_id用于Zep检索
@@ -426,7 +442,7 @@ class SimulationManager:
                 graph_id=state.graph_id,
                 simulation_requirement=simulation_requirement,
                 document_text=document_text,
-                entities=filtered.entities,
+                entities=usable_entities,
                 enable_twitter=state.enable_twitter,
                 enable_reddit=state.enable_reddit
             )

@@ -11,7 +11,7 @@ OASIS Agent Profile生成器
 import json
 import random
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -74,6 +74,91 @@ def _coerce_to_str_list(value: Any) -> List[str]:
         return result
     text = _coerce_to_str(value)
     return [text] if text else []
+
+
+# 结构上不可能是实体名的占位符与流水线产物（统一转小写后比较）
+_NON_ENTITY_NAME_PLACEHOLDERS = {
+    "none", "null", "n/a", "undefined", "unknown",
+    "entity", "node", "nodes", "edge", "edges",
+}
+
+# 产品自身的名称：出现在输入文本里时会被抽成实体，但它是跑模拟的工具，不是参与者
+_SELF_REFERENCE_NAMES = {"mirofish"}
+
+# 名称长度上限：真实机构名（如 "National Oceanic and Atmospheric Administration"，47字符）
+# 仍有充足余量，而被误抽成实体的散文片段通常远超该长度
+_MAX_ENTITY_NAME_CHARS = 80
+
+# 以句号结尾时判定为句子所需的最小词数，避免误伤 "Acme Co." 这类缩写
+_MIN_SENTENCE_WORDS = 5
+
+
+def _persona_entity_reject_reason(name: Any) -> Optional[str]:
+    """Return a reason code if a name cannot be a persona entity name, else None.
+
+    The checks are purely structural: a name is rejected when it is empty, a
+    known placeholder / pipeline artifact, or reads as a prose fragment rather
+    than a name. Organizations and groups are valid personas (see
+    ``_build_group_persona_prompt``) and are never rejected here.
+    """
+    if not isinstance(name, str):
+        return "empty_name"
+
+    stripped = name.strip()
+    if not stripped:
+        return "empty_name"
+
+    lowered = stripped.lower()
+    if lowered in _NON_ENTITY_NAME_PLACEHOLDERS:
+        return "placeholder"
+    if lowered in _SELF_REFERENCE_NAMES:
+        return "self_reference"
+
+    # 散文片段：换行、过长、以句末标点结尾
+    if '\n' in stripped or '\r' in stripped:
+        return "prose_fragment"
+    if len(stripped) > _MAX_ENTITY_NAME_CHARS:
+        return "prose_fragment"
+    if stripped[-1] in '!?;！？。；':
+        return "prose_fragment"
+    if stripped.endswith('.') and len(stripped.split()) >= _MIN_SENTENCE_WORDS:
+        return "prose_fragment"
+
+    # 逗号分隔的短语清单（三段以上且至少两段是多词短语），例如兴趣点枚举
+    segments = [segment.strip() for segment in stripped.split(',')]
+    if len(segments) >= 3 and sum(1 for segment in segments if ' ' in segment) >= 2:
+        return "clause_list"
+
+    # 全小写的多词英文短语（如 "market event"）是描述性片段而非名称；
+    # 中日韩等无大小写的名称 islower() 为 False，不受影响
+    if stripped.islower() and ' ' in stripped:
+        return "descriptor_phrase"
+
+    return None
+
+
+def partition_persona_entities(
+    entities: List[EntityNode]
+) -> Tuple[List[EntityNode], List[Tuple[EntityNode, str]]]:
+    """Split entities into persona candidates and rejected (entity, reason) pairs.
+
+    Callers that fan the same entity list out to several consumers (profiles and
+    agent activity configs) must filter once up front and pass the surviving
+    list to all of them, so that profile ``user_id`` and config ``agent_id``
+    keep referring to the same entity. The function is pure, so applying it to
+    an already filtered list is a no-op.
+    """
+    candidates: List[EntityNode] = []
+    skipped: List[Tuple[EntityNode, str]] = []
+
+    for entity in entities:
+        reason = _persona_entity_reject_reason(getattr(entity, 'name', None))
+        if reason:
+            skipped.append((entity, reason))
+        else:
+            candidates.append(entity)
+
+    return candidates, skipped
 
 
 @dataclass
@@ -924,6 +1009,17 @@ class OasisProfileGenerator:
         if graph_id:
             self.graph_id = graph_id
         
+        # 兜底：剔除结构上不可能是实体名的抽取噪声（占位符、散文片段等），
+        # 再分配user_id，保证编号连续、不留空洞。
+        # 需要同时生成Agent配置的调用方应在上游先过滤，详见 partition_persona_entities
+        entities, skipped_entities = partition_persona_entities(entities)
+        for skipped_entity, reason in skipped_entities:
+            logger.warning(t(
+                'progress.personaEntitySkipped',
+                name=getattr(skipped_entity, 'name', ''),
+                reason=reason
+            ))
+
         total = len(entities)
         profiles = [None] * total  # 预分配列表保持顺序
         completed_count = [0]  # 使用列表以便在闭包中修改
@@ -994,6 +1090,15 @@ class OasisProfileGenerator:
                 )
                 return idx, fallback_profile, str(e)
         
+        # 把剔除情况透出到进度回调，便于操作者看到少了哪些实体
+        # （total为0时不回调，调用方会用total计算百分比）
+        if skipped_entities and total and progress_callback:
+            progress_callback(
+                0,
+                total,
+                t('progress.personaEntitiesSkipped', count=len(skipped_entities), total=total)
+            )
+
         logger.info(f"开始并行生成 {total} 个Agent人设（并行数: {parallel_count}）...")
         print(f"\n{'='*60}")
         print(f"开始生成Agent人设 - 共 {total} 个实体，并行数: {parallel_count}")
