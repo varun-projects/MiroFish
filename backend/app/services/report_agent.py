@@ -19,7 +19,7 @@ from datetime import datetime
 from enum import Enum
 
 from ..config import Config
-from ..utils.llm_client import LLMClient
+from ..utils.llm_client import LLMClient, LLMResponseError
 from ..utils.logger import get_logger
 from ..utils.locale import get_language_instruction, t
 from .zep_tools import (
@@ -1341,15 +1341,28 @@ class ReportAgent:
                 )
             
             # 调用LLM
-            response = self.llm.chat(
-                messages=messages,
-                temperature=0.5,
-                max_tokens=4096
-            )
+            try:
+                response = self.llm.chat(
+                    messages=messages,
+                    temperature=0.5,
+                    max_tokens=4096
+                )
+            except LLMResponseError as e:
+                # 响应被截断或为空：不能当作章节正文，走与 None 相同的重试/强制收尾路径
+                logger.warning(t(
+                    'report.sectionIterUnusable',
+                    title=section.title,
+                    iteration=iteration + 1,
+                    reason=str(e)
+                ))
+                response = None
+            else:
+                # 检查 LLM 返回是否为 None（API 异常或内容为空）
+                if response is None:
+                    logger.warning(t('report.sectionIterNone', title=section.title, iteration=iteration + 1))
 
-            # 检查 LLM 返回是否为 None（API 异常或内容为空）
+            # 本轮响应不可用
             if response is None:
-                logger.warning(t('report.sectionIterNone', title=section.title, iteration=iteration + 1))
                 # 如果还有迭代次数，添加消息并重试
                 if iteration < max_iterations - 1:
                     messages.append({"role": "assistant", "content": "（响应为空）"})
@@ -1547,15 +1560,22 @@ class ReportAgent:
         logger.warning(t('report.sectionMaxIter', title=section.title))
         messages.append({"role": "user", "content": REACT_FORCE_FINAL_MSG})
         
-        response = self.llm.chat(
-            messages=messages,
-            temperature=0.5,
-            max_tokens=4096
-        )
+        try:
+            response = self.llm.chat(
+                messages=messages,
+                temperature=0.5,
+                max_tokens=4096
+            )
+        except LLMResponseError as e:
+            # 截断或空响应：保留明确的失败提示，而不是把空内容写进章节
+            logger.error(t('report.sectionForceUnusable', title=section.title, reason=str(e)))
+            response = None
+        else:
+            # 检查强制收尾时 LLM 返回是否为 None
+            if response is None:
+                logger.error(t('report.sectionForceFailed', title=section.title))
 
-        # 检查强制收尾时 LLM 返回是否为 None
         if response is None:
-            logger.error(t('report.sectionForceFailed', title=section.title))
             final_answer = t('report.sectionGenFailedContent')
         elif "Final Answer:" in response:
             final_answer = response.split("Final Answer:")[-1].strip()
