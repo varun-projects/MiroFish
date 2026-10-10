@@ -74,7 +74,12 @@ def _clean_chat_text(content: str) -> str:
     return cleaned.strip()
 
 
-def _usable_completion_text(response: Any, *, kind: str) -> Tuple[str, Optional[str]]:
+def _usable_completion_text(
+    response: Any,
+    *,
+    kind: str,
+    strict_finish_reason: bool = True,
+) -> Tuple[str, Optional[str]]:
     """Return cleaned completion text plus finish_reason, rejecting unusable ones.
 
     A provider that runs out of output budget reports finish_reason="length".
@@ -82,6 +87,13 @@ def _usable_completion_text(response: Any, *, kind: str) -> Tuple[str, Optional[
     in which case `message.content` is null and the extracted text is empty. An
     empty body must never be handed back as if generation had succeeded, so the
     truncation is reported instead.
+
+    `strict_finish_reason` keeps the JSON contract: any reason other than "stop"
+    is refused outright, because a retry is available and a half-built object is
+    worthless. Free text has no retry, and `LLM_BASE_URL` may point at any
+    OpenAI-compatible endpoint, some of which report vendor-specific success
+    tokens. With the flag off, an unrecognized reason is only fatal when the body
+    is also empty; a complete body is returned and the reason logged.
     """
 
     choices = getattr(response, "choices", None) or []
@@ -94,7 +106,9 @@ def _usable_completion_text(response: Any, *, kind: str) -> Tuple[str, Optional[
             f"LLM {kind} output was truncated at the token limit",
             finish_reason=finish_reason,
         )
-    if finish_reason not in {None, "stop"}:
+
+    unrecognized_finish_reason = finish_reason not in {None, "stop"}
+    if unrecognized_finish_reason and strict_finish_reason:
         raise LLMResponseError(
             f"LLM {kind} generation stopped unexpectedly ({finish_reason})",
             finish_reason=finish_reason,
@@ -102,9 +116,22 @@ def _usable_completion_text(response: Any, *, kind: str) -> Tuple[str, Optional[
 
     content = _clean_chat_text(extract_chat_completion_text(response))
     if not content:
+        if unrecognized_finish_reason:
+            raise LLMResponseError(
+                f"LLM {kind} generation stopped unexpectedly ({finish_reason})",
+                finish_reason=finish_reason,
+            )
         raise LLMResponseError(
             f"LLM returned empty {kind} content",
             finish_reason=finish_reason,
+        )
+
+    if unrecognized_finish_reason:
+        logger.warning(
+            "LLM %s completion reported an unrecognized finish_reason=%s; "
+            "the body is complete, so it is used as-is",
+            kind,
+            finish_reason,
         )
 
     return content, finish_reason
@@ -192,7 +219,11 @@ class LLMClient:
             max_tokens=max_tokens,
             response_format=response_format,
         )
-        content, _ = _usable_completion_text(response, kind="text")
+        content, _ = _usable_completion_text(
+            response,
+            kind="text",
+            strict_finish_reason=False,
+        )
         return content
     
     def chat_json(

@@ -590,6 +590,8 @@
     "reactGenerateSection": "ReACT生成章节: {title}",
     "sectionIterNone": "章节 {title} 第 {iteration} 次迭代: LLM 返回 None",
     "sectionIterUnusable": "章节 {title} 第 {iteration} 次迭代: LLM 响应不可用（{reason}）",
+    "sectionRetryNoTokenCap": "章节 {title}: 输出被截断，改用模型自身输出上限重试",
+    "sectionEmptyBody": "章节 {title}: LLM 输出清理后没有正文，使用默认错误提示",
     "sectionConflict": "章节 {title} 第 {iteration} 轮: LLM 同时输出工具调用和 Final Answer（第 {conflictCount} 次冲突）",
     "sectionConflictDowngrade": "章节 {title}: 连续 {conflictCount} 次冲突，降级为截断执行第一个工具调用",
     "sectionGenDone": "章节 {title} 生成完成（工具调用: {count}次）",

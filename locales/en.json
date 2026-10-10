@@ -590,6 +590,8 @@
     "reactGenerateSection": "ReACT generating section: {title}",
     "sectionIterNone": "Section {title} iteration {iteration}: LLM returned None",
     "sectionIterUnusable": "Section {title} iteration {iteration}: LLM response unusable ({reason})",
+    "sectionRetryNoTokenCap": "Section {title}: output was truncated, retrying without an output token cap",
+    "sectionEmptyBody": "Section {title}: LLM output left no section body, using default error message",
     "sectionConflict": "Section {title} round {iteration}: LLM output both tool call and Final Answer (conflict #{conflictCount})",
     "sectionConflictDowngrade": "Section {title}: {conflictCount} consecutive conflicts, downgrading to truncate and execute first tool call",
     "sectionGenDone": "Section {title} generation complete (tool calls: {count})",
